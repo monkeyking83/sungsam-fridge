@@ -1,0 +1,9 @@
+/build/
+/bin/
+/.gradle/
+/.settings/
+data/test.mv.db
+data/smartfridge.mv.db
+/.project
+/.classpath
+/logs/
