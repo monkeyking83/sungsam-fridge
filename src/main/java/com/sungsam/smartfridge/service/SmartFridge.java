@@ -2,6 +2,8 @@ package com.sungsam.smartfridge.service;
 
 import static com.sungsam.smartfridge.model.FridgeItem.MAX_FILL_FACTOR;
 import static com.sungsam.smartfridge.model.FridgeItem.MIN_FILL_FACTOR;
+import static com.sungsam.smartfridge.model.ItemType.MAX_ITEM_TYPE;
+import static com.sungsam.smartfridge.model.ItemType.MIN_ITEM_TYPE;
 
 import java.util.List;
 import java.util.Map;
@@ -9,6 +11,7 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
+import javax.persistence.EntityExistsException;
 import javax.transaction.Transactional;
 
 import org.slf4j.Logger;
@@ -24,124 +27,165 @@ import com.sungsam.smartfridge.model.ItemType;
 @Component
 public class SmartFridge implements SmartFridgeManager {
 
-	private Logger logger = LoggerFactory.getLogger(SmartFridge.class);
+    private Logger logger = LoggerFactory.getLogger(SmartFridge.class);
 
-	@Autowired
-	private ItemTypeRepository itemTypeRepo;
+    @Autowired
+    private ItemTypeRepository itemTypeRepo;
 
-	@Autowired
-	private FridgeItemRepository fridgeItemRepo;
+    @Autowired
+    private FridgeItemRepository fridgeItemRepo;
 
-	@Override
-	@Transactional
-	public void handleItemRemoved(String itemUUID) {
+    @Override
+    @Transactional
+    public void handleItemRemoved(String itemUUID) {
 
-		int deleted = fridgeItemRepo.deleteByItemId(UUID.fromString(itemUUID));
+        int deleted = fridgeItemRepo.deleteByItemId(toUuid(itemUUID));
 
-		if (deleted == 0) {
-			logger.warn(String.format("Attempted to delete item %s, but it does not exist.", itemUUID));
-		}
+        if (deleted == 0) {
+            logger.warn(String.format("Attempted to delete item %s, but it does not exist.", itemUUID));
+        }
+    }
 
-	}
+    @Override
+    @Transactional
+    public void handleItemAdded(long itemType, String itemUUID, String name, Double fillFactor) {
 
-	@Override
-	@Transactional
-	public void handleItemAdded(long itemType, String itemUUID, String name, Double fillFactor) {
+        validateItem(itemUUID, itemType, name, fillFactor);
 
-		ItemType type = new ItemType(itemType, name);
+        ItemType type = new ItemType(itemType, name);
+        UUID itemId = toUuid(itemUUID);
+        FridgeItem item = new FridgeItem(itemId, type, fillFactor);
 
-		FridgeItem item = new FridgeItem(UUID.fromString(itemUUID), type, fillFactor);
+        if (fridgeItemRepo.findById(itemId).isPresent()) {
+            // We follow the laws of newtonian physics in this refrigerator... two of the
+            // same exact object cannot occupy the same spot.
 
-		// Ensure item type exists
-		itemTypeRepo.save(type);
+            throw new EntityExistsException(String.format(
+                    "Fridge item with uuid %s already exists. It must first be removed before being re-added", itemId));
+        }
 
-		// TODO: error if item is already in the fridge?
+        itemTypeRepo.save(type);
 
-		// add/update item
-		fridgeItemRepo.save(item);
+        fridgeItemRepo.save(item);
 
-	}
+    }
 
-	/**
-	 * My best guess based on the javadocs was to list all found times in each
-	 * array, along with an object containing the item type and average fill factor.
-	 * If I had my way, this would have been a list of ItemResults objects, each
-	 * containing a list of the found items, and the itemType, and the average fill
-	 * factor.
-	 */
-	@Override
-	public Object[] getItems(Double fillFactor) {
-		if (fillFactor.compareTo(MIN_FILL_FACTOR) <= 0 || fillFactor.compareTo(MAX_FILL_FACTOR) > 0) {
-			throw new IllegalArgumentException(String.format(
-					"Fill factor must be a value between 0 exclusive, and 1.0 inclusive; the provided value was %s.",
-					fillFactor));
-		}
+    @Override
+    public Object[] getItems(Double fillFactor) {
 
-		Iterable<FridgeItem> allItems = fridgeItemRepo.findAll();
+        if (fillFactor == null || fillFactor.compareTo(MIN_FILL_FACTOR) <= 0
+                || fillFactor.compareTo(MAX_FILL_FACTOR) > 0) {
+            logger.warn(String.format(
+                    "An invalid fillFactor was provided: %s; valid values are between 0 exclusive and 1 inclusive.",
+                    fillFactor));
+            return new Object[0];
+        }
 
-		Map<ItemType, List<FridgeItem>> byType = StreamSupport.stream(allItems.spliterator(), false)
-				.filter(f -> f.lessThanFillFactor(fillFactor))
-				.collect(Collectors.groupingBy(FridgeItem::getItemType));
+        Iterable<FridgeItem> allItems = fridgeItemRepo.findAll();
 
-		Object[] results = new Object[byType.size()];
-		int index = 0;
-		
-		for (Map.Entry<ItemType, List<FridgeItem>> itemEntry : byType.entrySet()) {
-			List<FridgeItem> items = itemEntry.getValue();
-			ItemType itemType = itemEntry.getKey();
-			Object[] itemArray = new Object[items.size() + 1];
-			items.toArray(itemArray);
-			itemArray[items.size()] = new FillFactorResult(itemType.getItemTypeId(), calculateAverageFillFactor(items));
-			results[index] = itemArray;
-			index++;
-		}
-		
-		return results;
-	}
+        Map<Long, List<FillFactorResult>> byType = StreamSupport.stream(allItems.spliterator(), false)
+                .filter(f -> f.lessThanFillFactor(fillFactor)).map(f -> new FillFactorResult(f))
+                .collect(Collectors.groupingBy(FillFactorResult::getItemType));
 
-	@Override
-	public Double getFillFactor(long itemType) {
-		List<FridgeItem> fridgeItems = fridgeItemRepo.findByItemType(new ItemType(itemType));
+        Object[] results = new Object[byType.size()];
 
-		if (fridgeItems.size() == 0) {
-			logger.warn(String.format("No items were found with item type %s", itemType));
-		}
-	
-		return calculateAverageFillFactor(fridgeItems);
+        int i = 0;
+        for (List<FillFactorResult> fillFactors : byType.values()) {
+            results[i] = fillFactors.toArray();
+            i++;
+        }
 
-	}
+        return results;
+    }
 
-	
-	
-	@Override
-	@Transactional
-	public void forgetItem(long itemType) {
+    @Override
+    public Double getFillFactor(long itemType) {
+        List<FridgeItem> fridgeItems = fridgeItemRepo.findByItemType(new ItemType(itemType));
 
-		// delete all items of type "itemType"
-		ItemType toForget = new ItemType(itemType);
-		int deleted = fridgeItemRepo.deleteByItemType(toForget);
+        if (fridgeItems.size() == 0) {
+            logger.warn(String.format("No items were found with item type %s", itemType));
+            return Double.valueOf(0);
+        }
 
-		if (deleted > 0) {
-			itemTypeRepo.delete(toForget);
-		} else {
-			logger.warn(String.format("Attempted to forget item %s, but it does not exist", itemType));
-		}
+        return calculateAverageFillFactor(fridgeItems);
 
-	}
+    }
 
-	
-	private Double calculateAverageFillFactor(List<FridgeItem> fridgeItems) {
-		Double fillFactor = Double.valueOf(0);
+    @Override
+    @Transactional
+    public void forgetItem(long itemType) {
 
-		int nonEmptyCount = 0;
+        // delete all items of type "itemType"
+        ItemType toForget = new ItemType(itemType);
+        int deleted = fridgeItemRepo.deleteByItemType(toForget);
 
-		for (FridgeItem item : fridgeItems) {
-			if (!item.isEmpty()) {
-				fillFactor += item.getFillFactor();
-				nonEmptyCount++;
-			}
-		}
-		return nonEmptyCount > 0 ? fillFactor / nonEmptyCount : fillFactor;
-	}
+        if (deleted > 0) {
+            itemTypeRepo.delete(toForget);
+        } else {
+            logger.warn(String.format("Attempted to forget item %s, but it does not exist", itemType));
+        }
+
+    }
+
+    private Double calculateAverageFillFactor(List<FridgeItem> fridgeItems) {
+        Double fillFactor = Double.valueOf(0);
+
+        int nonEmptyCount = 0;
+
+        for (FridgeItem item : fridgeItems) {
+            if (!item.isEmpty()) {
+                fillFactor += item.getFillFactor();
+                nonEmptyCount++;
+            }
+        }
+        return nonEmptyCount > 0 ? fillFactor / nonEmptyCount : fillFactor;
+    }
+
+    private UUID toUuid(String uuid) {
+        try {
+            return UUID.fromString(uuid);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            throw new InvalidItemIdException(e, uuid);
+        }
+    }
+
+    /**
+     * 
+     * Validation methods. A potential improvement here is to use javax.validation
+     * annotations. This ultimately throws an Exception if anything was found to
+     * have failed.
+     */
+
+    private void validateItem(String uuid, long itemType, String itemName, Double fillFactor) {
+        StringBuilder validationMessages = new StringBuilder();
+
+        checkNull("Item Name", itemName, validationMessages);
+        checkNull("Fill Factor", fillFactor, validationMessages);
+        checkNull("Item UUID", uuid, validationMessages);
+
+        if (Long.valueOf(itemType).compareTo(MIN_ITEM_TYPE) <= 0
+                || Long.valueOf(itemType).compareTo(MAX_ITEM_TYPE) > 0) {
+            validationMessages.append(String.format("Item Type must be a value between %s and %s, and not %s.",
+                    MIN_ITEM_TYPE, MAX_ITEM_TYPE, itemType));
+        }
+
+        if (fillFactor != null) {
+            if (fillFactor.compareTo(MIN_FILL_FACTOR) < 0 || fillFactor.compareTo(MAX_FILL_FACTOR) > 0) {
+                validationMessages.append(String.format("Fill Factor must be a value between %s and %s, and not %s.",
+                        MIN_FILL_FACTOR, MAX_FILL_FACTOR, fillFactor));
+            }
+        }
+        
+        if (validationMessages.length() > 0) {
+            throw new ItemValidationException(validationMessages.toString());
+        }
+    }
+
+    private void checkNull(String fieldName, Object value, StringBuilder validationMessages) {
+        if (value == null || value.toString().trim().length() == 0) {
+            validationMessages.append(String.format("%s cannot be empty.\n", fieldName));
+        }
+
+    }
 
 }

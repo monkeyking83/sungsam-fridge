@@ -3,30 +3,27 @@ package com.sungsam.smartfridge.service;
 import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
 
+import com.sungsam.smartfridge.model.FridgeItem;
+
 public class FillFactorResult {
 	private Long itemType;
 	private Double fillFactor;
 
 	public FillFactorResult(Long itemType, Double fillFactor) {
-		super();
 		this.itemType = itemType;
 		this.fillFactor = fillFactor;
+	}
+
+	public FillFactorResult(FridgeItem fridgeItem) {
+		this(fridgeItem.getItemType().getItemTypeId(), fridgeItem.getFillFactor());
 	}
 
 	public Long getItemType() {
 		return itemType;
 	}
 
-	public void setItemType(Long itemType) {
-		this.itemType = itemType;
-	}
-
 	public Double getFillFactor() {
 		return fillFactor;
-	}
-
-	public void setFillFactor(Double fillFactor) {
-		this.fillFactor = fillFactor;
 	}
 
 	@Override
